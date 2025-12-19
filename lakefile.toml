@@ -1,0 +1,10 @@
+name = "python-modlang"
+version = "0.1.0"
+defaultTargets = ["python-modlang"]
+
+[[lean_lib]]
+name = "PythonModlang"
+
+[[lean_exe]]
+name = "python-modlang"
+root = "Main"
