@@ -60,7 +60,7 @@ inductive Commands where
 | read
 | write
 
-def RWSig : Signature Commands where
+abbrev RWSig : Signature Commands where
   arity
     | .read => 0
     | .write => 1
@@ -72,19 +72,23 @@ def RWSig : Signature Commands where
   | .read => Nat
   | .write => Unit
 
-#print ULift
-
 --- whyyyy
 def read : FreeM RWSig Nat := FreeM.fOp Commands.read (fun i => ⟦⟧ i)
 
 def write : Nat → FreeM RWSig Unit := fun n => FreeM.fOp Commands.write ⟦n⟧
 
-#check ⟦⟧
-#check do
+def test := do
   let x ← pure 4
   let y : Nat ← read
   let _ ← write 3
   return x + y
+
+def StateEnv : Env RWSig (StateM Nat) where
+  evalS
+    | .read => fun _ => get
+    | .write => fun i => set (i (0 : Fin (RWSig.arity .write)))
+
+#eval StateT.run (evalFreeM StateEnv test) 42
 
 end Test
 
