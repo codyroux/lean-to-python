@@ -8,3 +8,9 @@ name = "PythonModlang"
 [[lean_exe]]
 name = "python-modlang"
 root = "Main"
+
+[[require]]
+name = "Qq"
+git = "https://github.com/leanprover-community/quote4"
+rev = "master"
+version = "v4.27.0"
