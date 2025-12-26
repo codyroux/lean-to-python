@@ -129,14 +129,27 @@ private def f : Nat → Nat := fun n => n+1
 
 
 def numToPython (e : Lean.Expr) : MetaM PyVal :=
+  dbg_trace s!"Num: {e}"
   let c : Option _ := e.app3? ``OfNat.ofNat
   if let .some (_, n, _) := c
   then return s!"{n}"
   else failure
 
 def constToPython (e : Lean.Expr) : MetaM PyVal :=
+  dbg_trace s!"Const: {e}"
   if let .some (c, _) := e.const?
-  then return s!"{c.getString!}"
+  then
+    if c == ``Bool.true then return "True"
+    else if c == ``Bool.false then return "False"
+    else return s!"{c.getString!}"
+  else failure
+
+def fvarToPython (e : Lean.Expr) : MetaM PyVal :=
+  dbg_trace s!"FVar: {e}"
+  if e.isFVar
+  then do
+    let name := e.fvarId!.name
+    return s!"{joinSep name.components "_"}"
   else failure
 
 def countImplicits (e : Lean.Expr) : Nat :=
@@ -193,28 +206,49 @@ partial def funToPython (e : Lean.Expr) : MetaM PyVal := do
   let numImplicits := countImplicits ty
   let args := e.getAppArgs.drop numImplicits
   let argsPy ← args.mapM exprToPython
-  let argsPy := paren <| joinSep argsPy.toList ","
+  let argsPy := paren <| joinSep argsPy.toList ", "
   let f ← exprToPython e.getAppFn
   return s!"{f}{argsPy}"
+
+partial def lamToPython (e : Lean.Expr) : MetaM PyVal := do
+  dbg_trace s!"Lambda: {e}"
+  if e.isLambda then
+    Lean.Meta.lambdaTelescope e
+      (fun args body => do
+        dbg_trace s!"args: {args}\nbody:{body}"
+        let args ← args.mapM exprToPython
+        dbg_trace s!"pythonArgs: {args}"
+        let args := joinSep args.toList ", "
+        let body ← exprToPython body
+        return s!"(lambda {args}: {body})")
+  else
+  failure
 
 partial def exprToPython (e : Lean.Expr) : MetaM PyVal := do
   if e.isConst then
     constToPython e
+  else if e.isFVar then
+    fvarToPython e
+  else if e.isApp then
+    let n := e.getAppFn.constName!
+    if n == ``OfNat.ofNat then numToPython e
+    else if n == ``HAdd.hAdd then addToPython e
+    else if n == ``HMul.hMul then mulToPython e
+    else if n == ``Eq then eqToPython e
+    else if n == ``ite then iteToPython e
+    else funToPython e
+  else if e.isLambda then lamToPython e
   else
-    if e.isApp then
-      let n := e.getAppFn.constName!
-      if n == ``OfNat.ofNat then numToPython e
-      else if n == ``HAdd.hAdd then addToPython e
-      else if n == ``HMul.hMul then mulToPython e
-      else if n == ``Eq then eqToPython e
-      else if n == ``ite then iteToPython e
-      else funToPython e
-    else failure
+    dbg_trace s!"Cannot handle {e} {e.isFVar}"
+    failure
 
 end
 
+/-- info: ((lambda _uniq_21912: 3) if (True == True) else (lambda _uniq_21913: f((_uniq_21913 * x))))
+-/
+#guard_msgs(info) in
 #eval do
-  let t ← `(if 3 = 3 then 0 else f (0 * x))
+  let t ← `(if true then (fun x => 3) else (fun z => f (z * x)))
   let e ← Elab.Term.elabTerm t none
   let e ← instantiateMVars e
   logInfo s!"{e}"
