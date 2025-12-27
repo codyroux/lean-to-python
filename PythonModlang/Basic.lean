@@ -221,11 +221,9 @@ partial def funToPython (e : Lean.Expr) : MetaM PyVal := do
 partial def lamToPython (e : Lean.Expr) : MetaM PyVal := do
   dbg_trace s!"Lambda: {e}"
   if e.isLambda then
-    Lean.Meta.lambdaTelescope e
+    Meta.lambdaTelescope e
       (fun args body => do
-        dbg_trace s!"args: {args}\nbody:{body}"
         let args ← args.mapM exprToPython
-        dbg_trace s!"pythonArgs: {args}"
         let args := joinSep args.toList ", "
         let body ← exprToPython body
         return s!"(lambda {args}: {body})")
@@ -239,12 +237,15 @@ partial def exprToPython (e : Lean.Expr) : MetaM PyVal := do
   else if e.isFVar then
     fvarToPython e
   else if e.isApp then
-    let n := e.getAppFn.constName!
-    if n == ``OfNat.ofNat then numToPython e
-    else if n == ``HAdd.hAdd then addToPython e
-    else if n == ``HMul.hMul then mulToPython e
-    else if n == ``Eq then eqToPython e
-    else if n == ``ite then iteToPython e
+    let hd := e.getAppFn
+    if hd.isConst then
+      let n := hd.constName!
+      if n == ``OfNat.ofNat then numToPython e
+      else if n == ``HAdd.hAdd then addToPython e
+      else if n == ``HMul.hMul then mulToPython e
+      else if n == ``Eq then eqToPython e
+      else if n == ``ite then iteToPython e
+      else funToPython e
     else funToPython e
   else if e.isLambda then lamToPython e
   else do
@@ -253,23 +254,55 @@ partial def exprToPython (e : Lean.Expr) : MetaM PyVal := do
 
 end
 
-def piToPython (e : Expr) : PyVal :=
-  sorry
+def lamToPythonDef (n : Name) (e : Expr) : MetaM PyVal := do
+  if not e.isLambda then
+    let body ← exprToPython e
+    return s!"def {n.getString!}():\n\t{body}"
+  else
+    Meta.lambdaTelescope e
+      (fun args body => do
+        let args ← args.mapM exprToPython
+        let args := joinSep args.toList ", "
+        let body ← exprToPython body
+        return s!"def {n.getString!}({args}):\n\t{body}")
+
+#print DefinitionVal
 
 def defToPython (n : Name) : MetaM PyVal := do
   let info ← getConstInfo n
   match info with
-  | .defnInfo info => sorry
+  | .defnInfo info =>
+    lamToPythonDef n info.value
   | _ =>
     logError m!"{n} is not a definition"
     failure
 
+def test_1 (x y : Nat) : Nat := x + y
+
 #eval do
-  let t ← `(if true then (fun x => 3) else (fun z => f (z * x)))
+  let t ← `(if true then (fun x => 3) 4 else (fun z => f (z * x)) 5)
   let e ← Elab.Term.elabTerm t none
   let e ← instantiateMVars e
   logInfo s!"{e}"
   let py ← exprToPython e
   logInfo py
+
+#eval do
+  defToPython ``test_1
+
+#eval do
+  let i ← getConstInfo ``countImplicits
+  match i with
+  | .defnInfo i =>
+    logInfo m!"{i.value}"
+    logInfo "def"
+  | .recInfo _ => logInfo "rec"
+  | .ctorInfo _ => logInfo "ctor"
+  | .inductInfo _ => logInfo "induct"
+  | .quotInfo _ => logInfo "quot"
+  | .opaqueInfo _ => logInfo "opaque"
+  | .thmInfo _ => logInfo "thm"
+  | .axiomInfo _ => logInfo "axiom"
+
 
 def toPython (e : Expr) : PyVal := ""
