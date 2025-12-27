@@ -113,7 +113,7 @@ class PythonRepr (α : Type) where
   toPython : α → PyVal
 
 private def x : Nat := 4
-private def f : Nat → Nat := fun n => n+1
+private def f : Nat → Nat := fun n => n + 1
 
 #eval do
   -- let t ← `(if true then 3 else 4)
@@ -141,7 +141,7 @@ def constToPython (e : Lean.Expr) : MetaM PyVal :=
   then
     if c == ``Bool.true then return "True"
     else if c == ``Bool.false then return "False"
-    else return s!"{c.getString!}"
+    else return s!"{c.getString!}()"
   else do
     logError m!"{e} is not a const"
     failure
@@ -213,13 +213,15 @@ partial def funToPython (e : Lean.Expr) : MetaM PyVal := do
   let ty ← Meta.inferType e
   let numImplicits := countImplicits ty
   let args := e.getAppArgs.drop numImplicits
+  let fn := e.getAppFn
   let argsPy ← args.mapM exprToPython
-  let argsPy := paren <| joinSep argsPy.toList ", "
-  let f ← exprToPython e.getAppFn
-  return s!"{f}{argsPy}"
+  let argsPy := joinSep argsPy.toList ", "
+  let f ← if fn.isConst
+          then pure <| Std.Format.text fn.constName!.getString!
+          else exprToPython fn
+  return s!"{f}({argsPy})"
 
 partial def lamToPython (e : Lean.Expr) : MetaM PyVal := do
-  dbg_trace s!"Lambda: {e}"
   if e.isLambda then
     Meta.lambdaTelescope e
       (fun args body => do
@@ -233,11 +235,14 @@ partial def lamToPython (e : Lean.Expr) : MetaM PyVal := do
 
 partial def exprToPython (e : Lean.Expr) : MetaM PyVal := do
   if e.isConst then
+    -- dbg_trace s!"const case: {e.constName!}"
     constToPython e
   else if e.isFVar then
+    -- dbg_trace s!"var case"
     fvarToPython e
   else if e.isApp then
     let hd := e.getAppFn
+    -- dbg_trace s!"app case: {hd}"
     if hd.isConst then
       let n := hd.constName!
       if n == ``OfNat.ofNat then numToPython e
@@ -247,7 +252,9 @@ partial def exprToPython (e : Lean.Expr) : MetaM PyVal := do
       else if n == ``ite then iteToPython e
       else funToPython e
     else funToPython e
-  else if e.isLambda then lamToPython e
+  else if e.isLambda then
+    -- dbg_trace s!"lam case"
+    lamToPython e
   else do
     logError m!"{e} is not of a handled form."
     failure
@@ -279,8 +286,10 @@ def defToPython (n : Name) : MetaM PyVal := do
 
 def test_1 (x y : Nat) : Nat := x + y
 
+def z := 4
+
 #eval do
-  let t ← `(if true then (fun x => 3) 4 else (fun z => f (z * x)) 5)
+  let t ← `(if true then x else f (z * x))
   let e ← Elab.Term.elabTerm t none
   let e ← instantiateMVars e
   logInfo s!"{e}"
