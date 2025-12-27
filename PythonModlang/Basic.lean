@@ -129,20 +129,22 @@ private def f : Nat → Nat := fun n => n+1
 
 
 def numToPython (e : Lean.Expr) : MetaM PyVal :=
-  dbg_trace s!"Num: {e}"
   let c : Option _ := e.app3? ``OfNat.ofNat
   if let .some (_, n, _) := c
   then return s!"{n}"
-  else failure
+  else do
+    logError m!"{e} is not an `OfNat`"
+    failure
 
 def constToPython (e : Lean.Expr) : MetaM PyVal :=
-  dbg_trace s!"Const: {e}"
   if let .some (c, _) := e.const?
   then
     if c == ``Bool.true then return "True"
     else if c == ``Bool.false then return "False"
     else return s!"{c.getString!}"
-  else failure
+  else do
+    logError m!"{e} is not a const"
+    failure
 
 def fvarToPython (e : Lean.Expr) : MetaM PyVal :=
   dbg_trace s!"FVar: {e}"
@@ -150,7 +152,9 @@ def fvarToPython (e : Lean.Expr) : MetaM PyVal :=
   then do
     let name := e.fvarId!.name
     return s!"{joinSep name.components "_"}"
-  else failure
+  else do
+    logError m!"{e} is not an `FVar`"
+    failure
 
 def countImplicits (e : Lean.Expr) : Nat :=
 match e with
@@ -168,8 +172,9 @@ partial def addToPython (e : Lean.Expr) : MetaM PyVal :=
       let arg₁ ← exprToPython <| e.getArg! 4
       let arg₂ ← exprToPython <| e.getArg! 5
       return s!"({arg₁} + {arg₂})"
-  else
-  failure
+  else do
+    logError m!"{e} is not an `HAdd`"
+    failure
 
 partial def mulToPython (e : Lean.Expr) : MetaM PyVal :=
   if e.getAppFn.constName! == ``HMul.hMul then
@@ -177,8 +182,9 @@ partial def mulToPython (e : Lean.Expr) : MetaM PyVal :=
       let arg₁ ← exprToPython <| e.getArg! 4
       let arg₂ ← exprToPython <| e.getArg! 5
       return s!"({arg₁} * {arg₂})"
-  else
-  failure
+  else do
+    logError m!"{e} is not an `HMul`"
+    failure
 
 
 partial def eqToPython (e : Lean.Expr) : MetaM PyVal :=
@@ -187,8 +193,9 @@ partial def eqToPython (e : Lean.Expr) : MetaM PyVal :=
       let arg₁ ← exprToPython <| e.getArg! 1
       let arg₂ ← exprToPython <| e.getArg! 5
       return s!"({arg₁} == {arg₂})"
-  else
-  failure
+  else do
+    logError m!"{e} is not an `Eq`"
+    failure
 
 
 partial def iteToPython (e : Lean.Expr) : MetaM PyVal :=
@@ -198,8 +205,9 @@ partial def iteToPython (e : Lean.Expr) : MetaM PyVal :=
       let arg₂ ← exprToPython <| e.getArg! 3
       let arg₃ ← exprToPython <| e.getArg! 4
       return s!"({arg₂} if {arg₁} else {arg₃})"
-  else
-  failure
+  else do
+    logError m!"{e} is not an `if ... then ... else ...`"
+    failure
 
 partial def funToPython (e : Lean.Expr) : MetaM PyVal := do
   let ty ← Meta.inferType e
@@ -221,8 +229,9 @@ partial def lamToPython (e : Lean.Expr) : MetaM PyVal := do
         let args := joinSep args.toList ", "
         let body ← exprToPython body
         return s!"(lambda {args}: {body})")
-  else
-  failure
+  else do
+    logError m!"{e} is not a λ"
+    failure
 
 partial def exprToPython (e : Lean.Expr) : MetaM PyVal := do
   if e.isConst then
@@ -238,15 +247,23 @@ partial def exprToPython (e : Lean.Expr) : MetaM PyVal := do
     else if n == ``ite then iteToPython e
     else funToPython e
   else if e.isLambda then lamToPython e
-  else
-    dbg_trace s!"Cannot handle {e} {e.isFVar}"
+  else do
+    logError m!"{e} is not of a handled form."
     failure
 
 end
 
-/-- info: ((lambda _uniq_21912: 3) if (True == True) else (lambda _uniq_21913: f((_uniq_21913 * x))))
--/
-#guard_msgs(info) in
+def piToPython (e : Expr) : PyVal :=
+  sorry
+
+def defToPython (n : Name) : MetaM PyVal := do
+  let info ← getConstInfo n
+  match info with
+  | .defnInfo info => sorry
+  | _ =>
+    logError m!"{n} is not a definition"
+    failure
+
 #eval do
   let t ← `(if true then (fun x => 3) else (fun z => f (z * x)))
   let e ← Elab.Term.elabTerm t none
@@ -256,83 +273,3 @@ end
   logInfo py
 
 def toPython (e : Expr) : PyVal := ""
-
---- This is all garbage?
-
-
-/- -- TODO: how do I model effectful operations?
--- Do I need to be step-indexed somehow?
--- How do I model fixpoints?
-
-
-
-/--
-A free monad with extra operations
-
-This is all pretty standard stuff.
--/
-inductive FreeM : Type → Type 1 where
--- The monadic ops
-| fPure : α → FreeM α
-| fBind : FreeM α → (α → FreeM β) → FreeM β
--- Declaring fresh types and operations
-| typeDecl : (Type → FreeM α) → FreeM α
--- Operations can be effectful
-| opDecl : FreeM α
--- and assumptions
-| assume {P : Prop} : Decidable P → (P → FreeM α) → FreeM α
--- What does assert look like?
--- | assert {P : Prop} : FreeM ???
-
--- Question: if I assume that this is going to be a state monad
--- is there an easy way to add effectful ops?
-
--- This is the environment that supplies the pure operations
-inductive EvalEnv (m : Type → Type) : Type → Type _ where
-| runPure : EvalEnv m α
--- This seems nuts
-| runBind : (∀ α, EvalEnv m α) → (∀ α, α → EvalEnv m β) → EvalEnv m β
-| runTypeDecl : Type → EvalEnv m α → EvalEnv m α
-| runOpDecl {α : Type} : m α → EvalEnv m α
-| runAssume {P : Type} : EvalEnv m α → EvalEnv m α
-
-open FreeM EvalEnv
-
-def evalFreeM [Monad m] (x : FreeM α) (env : EvalEnv m α) : OptionT m α :=
-  match x, env with
-  | fPure a, runPure => return a
-  | @fBind α β m f, runBind em ef => do
-    let x ← evalFreeM m (em _)
-    let v ← evalFreeM (f x) (ef _ x)
-    return v
-  | typeDecl x, runTypeDecl ty e => evalFreeM (x ty) e
-  | opDecl, runOpDecl op => op
-  | assume h x, runAssume e =>
-    (match h with
-    | .isTrue p => evalFreeM (x p) e
-    | _ => failure)
-  | _, _ => failure
- -/
-
-/-
--- I don't get how any of this works
-section TestQ
-open Qq
-
-def foo (x : Q(Nat)) : MetaM String :=
-  match x with
-  | ~q(0) => return "foo"
-  | ~q($x) => return s!"{x}"
-  | _ => return "bar"
-
-abbrev y : Nat := 0
-
-#eval do
-  let t ← `(y)
-  let e ← Elab.Term.elabTerm t none
-  let bar ← foo e
-  logInfo m!"{bar}"
-
-
-end TestQ
- -/
