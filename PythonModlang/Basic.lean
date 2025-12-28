@@ -90,6 +90,30 @@ def StateEnv : Env RWSig (StateM Nat) where
 
 #eval StateT.run (evalFreeM StateEnv test) 42
 
+
+-- Wat
+#eval do
+  let t ← `(
+  do
+    let x ← pure 4
+    let y : Nat ← read
+    let _ ← write 3
+    return x + y)
+  let e ← Lean.Elab.Term.elabTerm t none
+  let e ← Lean.Meta.whnf e
+  let e ← Lean.instantiateMVars e
+  Lean.logInfo m!"{e}"
+
+
+#eval do
+  let i ← Lean.getConstInfo ``test
+  let e := i.value!
+  Lean.logInfo m!"{e}"
+  let e ← Lean.Meta.whnf e
+  let e ← Lean.instantiateMVars e
+  Lean.logInfo m!"{e}"
+
+
 end Test
 
 open Lean
@@ -147,7 +171,6 @@ def constToPython (e : Lean.Expr) : MetaM PyVal :=
     failure
 
 def fvarToPython (e : Lean.Expr) : MetaM PyVal :=
-  dbg_trace s!"FVar: {e}"
   if e.isFVar
   then do
     let name := e.fvarId!.name
@@ -156,13 +179,47 @@ def fvarToPython (e : Lean.Expr) : MetaM PyVal :=
     logError m!"{e} is not an `FVar`"
     failure
 
-def countImplicits (e : Lean.Expr) : Nat :=
+def countImplicitsTy (e : Lean.Expr) : Nat :=
 match e with
 | .forallE _ _ e' info =>
   if info == BinderInfo.implicit
-  then countImplicits e' + 1
-  else countImplicits e'
+  then countImplicitsTy e' + 1
+  else countImplicitsTy e'
 | _ => 0
+
+def countImplicits (e : Lean.Expr) : MetaM Nat := do
+  let ty ← Meta.inferType e
+  if e.isConst then
+    let i ← getConstInfo e.constName!
+    let ty := i.type
+    return countImplicitsTy ty
+  else
+    return countImplicitsTy ty
+
+#check List.cons
+
+#eval do
+  let ty ← `({x : Nat} → Nat)
+  let ty ← Elab.Term.elabTerm ty none
+  logInfo m!"{countImplicitsTy ty}"
+
+#eval do
+  let t ← `(List.nil)
+  let e ← Elab.Term.elabTerm t none
+  let n ← countImplicits e
+  logInfo m!"{e} has {n}"
+
+
+
+#eval do
+  let n := ``List.cons
+  let i ← getConstInfo n
+  match i with
+  | .ctorInfo i | .defnInfo i =>
+    let ty := i.type
+    logInfo m!"{ty} has {countImplicitsTy ty}"
+  | _ => logError "uh oh"
+
 
 mutual
 
@@ -210,10 +267,9 @@ partial def iteToPython (e : Lean.Expr) : MetaM PyVal :=
     failure
 
 partial def funToPython (e : Lean.Expr) : MetaM PyVal := do
-  let ty ← Meta.inferType e
-  let numImplicits := countImplicits ty
-  let args := e.getAppArgs.drop numImplicits
   let fn := e.getAppFn
+  let numImplicits ← countImplicits fn
+  let args := e.getAppArgs.drop numImplicits
   let argsPy ← args.mapM exprToPython
   let argsPy := joinSep argsPy.toList ", "
   let f ← if fn.isConst
@@ -264,14 +320,14 @@ end
 def lamToPythonDef (n : Name) (e : Expr) : MetaM PyVal := do
   if not e.isLambda then
     let body ← exprToPython e
-    return s!"def {n.getString!}():\n\t{body}"
+    return s!"def {n.getString!}():\n\treturn {body}"
   else
     Meta.lambdaTelescope e
       (fun args body => do
         let args ← args.mapM exprToPython
         let args := joinSep args.toList ", "
         let body ← exprToPython body
-        return s!"def {n.getString!}({args}):\n\t{body}")
+        return s!"def {n.getString!}({args}):\n\treturn {body}")
 
 #print DefinitionVal
 
@@ -285,6 +341,7 @@ def defToPython (n : Name) : MetaM PyVal := do
     failure
 
 def test_1 (x y : Nat) : Nat := x + y
+def test_2 (x : Nat) : List Nat := [x]
 
 def z := 4
 
@@ -296,8 +353,19 @@ def z := 4
   let py ← exprToPython e
   logInfo py
 
+#check do let x : Nat ← fPure 3; return x + 1
+
+
+#check do let x : Nat ← fPure 3; return x + 1
+
+
+#check List.cons
+
 #eval do
   defToPython ``test_1
+
+#eval do
+  defToPython ``test_2
 
 #eval do
   let i ← getConstInfo ``countImplicits
