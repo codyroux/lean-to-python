@@ -54,67 +54,6 @@ macro_rules
 
 #check ⟦1, 2, 3⟧
 
-section Test
-
-inductive Commands where
-| read
-| write
-
-abbrev RWSig : Signature Commands where
-  arity
-    | .read => 0
-    | .write => 1
-  argTy c _ :=
-  match c with
-  | .write => Nat
-  outTy c :=
-  match c with
-  | .read => Nat
-  | .write => Unit
-
---- whyyyy
-def read : FreeM RWSig Nat := FreeM.fOp Commands.read (fun i => ⟦⟧ i)
-
-def write : Nat → FreeM RWSig Unit := fun n => FreeM.fOp Commands.write ⟦n⟧
-
-def test := do
-  let x ← pure 4
-  let y : Nat ← read
-  let _ ← write 3
-  return x + y
-
-def StateEnv : Env RWSig (StateM Nat) where
-  evalS
-    | .read => fun _ => get
-    | .write => fun i => set (i (0 : Fin (RWSig.arity .write)))
-
-#eval StateT.run (evalFreeM StateEnv test) 42
-
-
--- Wat
-#eval do
-  let t ← `(
-  do
-    let x ← pure 4
-    let y : Nat ← read
-    let _ ← write 3
-    return x + y)
-  let e ← Lean.Elab.Term.elabTerm t none
-  let e ← Lean.Meta.whnf e
-  let e ← Lean.instantiateMVars e
-  Lean.logInfo m!"{e}"
-
-
-#eval do
-  let i ← Lean.getConstInfo ``test
-  let e := i.value!
-  Lean.logInfo m!"{e}"
-  let e ← Lean.Meta.whnf e
-  let e ← Lean.instantiateMVars e
-  Lean.logInfo m!"{e}"
-
-
-end Test
 
 open Lean
 open Std.Format
@@ -381,5 +320,125 @@ def z := 4
   | .thmInfo _ => logInfo "thm"
   | .axiomInfo _ => logInfo "axiom"
 
+-- Continuations for monadic actions
+inductive Kont where
+| assign : Expr → Kont
+| ret : Kont
+| effect : Kont
+
+abbrev PyEnv := Expr → String
+
+def runWithCont (k : Kont) (e : Expr) : MetaM PyVal := do
+  match k with
+  | .assign x =>
+    let x ← exprToPython x
+    let v ← exprToPython e
+    return s!"{x} = {v}"
+  | .ret => return s!"return {← exprToPython e}"
+  | .effect => return ← exprToPython e
+
+partial def freeMToPython (k : Kont) (env : PyEnv) (e : Expr) : MetaM PyVal := do
+  let ty ← Meta.inferType e
+  if (Expr.app3? ty ``FreeM).isNone then
+    logError m!"Expected {e} to be of type `FreeM`"
+    failure
+  else
+    let e ← Meta.whnf e
+    let eArgs := e.getAppArgs
+    if (e.app4? ``fPure).isSome
+    then
+      runWithCont k eArgs[4]!
+    else if e.getAppFn.constName! == ``fBind
+    then
+      let x := eArgs[4]!
+      let f := eArgs[5]!
+      assert! f.isLambda
+      Meta.lambdaTelescope f
+        (fun vars body => do
+          let v := vars[0]!
+          let xPy ← freeMToPython (.assign v) env x
+          let bPy ← freeMToPython k env body
+          return s!"{xPy}\n{bPy}")
+    else if e.getAppFn.constName! == ``fOp
+    then
+      let opStr := env eArgs[2]!
+      let args ← (eArgs.drop 3).mapM exprToPython
+      let args := joinSep args.toList ", "
+      return s!"{opStr}({args})"
+    else
+      logError m!"Unexpected term: {e.getAppFn}"
+      failure
+
 
 def toPython (e : Expr) : PyVal := ""
+
+section Test
+
+inductive Commands where
+| read
+| write
+
+abbrev RWSig : Signature Commands where
+  arity
+    | .read => 0
+    | .write => 1
+  argTy c _ :=
+  match c with
+  | .write => Nat
+  outTy c :=
+  match c with
+  | .read => Nat
+  | .write => Unit
+
+--- whyyyy
+def read : FreeM RWSig Nat := FreeM.fOp Commands.read (fun i => ⟦⟧ i)
+
+def write : Nat → FreeM RWSig Unit := fun n => FreeM.fOp Commands.write ⟦n⟧
+
+def test := do
+  let x ← pure 4
+  let y : Nat ← read
+  let _ ← write 3
+  return x + y
+
+def StateEnv : Env RWSig (StateM Nat) where
+  evalS
+    | .read => fun _ => get
+    | .write => fun i => set (i (0 : Fin (RWSig.arity .write)))
+
+#eval StateT.run (evalFreeM StateEnv test) 42
+
+
+-- Wat
+#eval do
+  let t ← `(
+  do
+    let x ← pure 4
+    let y : Nat ← read
+    let _ ← write 3
+    return x + y)
+  let e ← Lean.Elab.Term.elabTerm t none
+  let e ← Lean.Meta.whnf e
+  let e ← Lean.instantiateMVars e
+  Lean.logInfo m!"{e}"
+
+def envOps (e : Expr) :=
+  match e.constName? with
+  | .some n =>
+    if n == ``Commands.read then "read"
+    else if n == ``Commands.write then "write"
+    else s!"unknown {n}"
+  | _ => s!"unknown expr"
+
+
+#eval do
+  let i ← Lean.getConstInfo ``test
+  let e := i.value!
+  Lean.logInfo m!"{e}"
+  let e ← Lean.Meta.whnf e
+  let e ← Lean.instantiateMVars e
+  Lean.logInfo m!"{e}"
+  logInfo m!"{← freeMToPython .ret envOps e}"
+
+
+end Test
