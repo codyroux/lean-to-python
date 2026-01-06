@@ -385,7 +385,7 @@ partial def freeMToPython (k : Kont) (env : PyEnv) (e : Expr) : MetaM PyVal := d
     let eArgs := e.getAppArgs
     if (e.app4? ``fPure).isSome
     then
-      logInfo m!"pure {eArgs[3]!}"
+      -- logInfo m!"pure {eArgs[3]!}"
       let v ← exprToPython (eArgs[3]!)
       runWithCont k v
     else if e.getAppFn.constName! = ``fBind
@@ -395,14 +395,14 @@ partial def freeMToPython (k : Kont) (env : PyEnv) (e : Expr) : MetaM PyVal := d
       assert! f.isLambda
       Meta.lambdaTelescope f
         (fun vars body => do
-          logInfo m!"lam {vars}"
+          -- logInfo m!"lam {vars}"
           let v := vars[0]!
           let xPy ← freeMToPython (.assign v) env x
           let bPy ← freeMToPython k env body
           return s!"{xPy}\n{bPy}")
     else if e.getAppFn.constName! = ``fOp
     then
-      logInfo m!"op {eArgs[2]!}"
+      -- logInfo m!"op {eArgs[2]!}"
       let opStr := env eArgs[2]!
       let args ← opArgToPython (eArgs[3]!)
       let v := s!"{opStr}({args})"
@@ -411,7 +411,39 @@ partial def freeMToPython (k : Kont) (env : PyEnv) (e : Expr) : MetaM PyVal := d
       logError m!"Unexpected term: {e.getAppFn}"
       failure
 
-def toPython (e : Expr) : PyVal := ""
+def defToPython (n : Name) (env : PyEnv) : MetaM PyVal := do
+  let info ← getConstInfo n
+  match info with
+  | .defnInfo info =>
+    let ty := info.type
+    let ret :=
+    if h : ty.isForall then
+      ty.forallBody h
+    else ty
+    match ret.app3? ``FreeM with
+    | .none =>
+      exprLamToPythonDef n info.value
+    | _ =>
+      let e := info.value
+      if not e.isLambda then
+        let body ← freeMToPython .ret env e
+        let body := Format.nest 2 s!"\n{body}"
+        return s!"def {n.getString!}():{body}"
+      else
+        Meta.lambdaTelescope e
+          fun args body => do
+          let args ← args.mapM exprToPython
+          let args := joinSep args.toList ", "
+          let body ← freeMToPython .ret env body
+          let body := Format.nest 2 s!"\n{body}"
+          return s!"def {n.getString!}({args}):{body}"
+
+     failure
+  | _ =>
+    logError m!"{n} is not a definition"
+    failure
+
+
 
 section Test
 
@@ -453,8 +485,19 @@ def StateEnv : Env RWSig (StateM Nat) where
     | .read => fun _ => get
     | .write => fun i => set (i (0 : Fin (RWSig.arity .write)))
 
-#eval StateT.run (evalFreeM StateEnv test) 42
+#eval (evalFreeM StateEnv test).run 42
 
+def incBy i := do
+  let c : Nat ← read
+  let _ ← write (c + i)
+  return ()
+
+theorem incIsPlus (i s : Nat) :
+  (evalFreeM StateEnv <| incBy i).run s = ((), s + i) := by
+-- simp [StateT.run, incBy, evalFreeM, _root_.read, write]
+-- simp [StateEnv, listToVec, iCons]
+-- simp [get, set]
+exact rfl
 
 -- Wat
 #eval do
@@ -497,6 +540,6 @@ def envOps (e : Expr) :=
   logInfo m!"{← freeMToPython .ret envOps e}"
 
 #eval do
-  logInfo m!"{← defToPython ``test}"
+  logInfo m!"{← defToPython ``test envOps}"
 
 end Test
