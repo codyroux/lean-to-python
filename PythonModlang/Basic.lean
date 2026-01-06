@@ -256,25 +256,25 @@ partial def exprToPython (e : Lean.Expr) : MetaM PyVal := do
 
 end
 
-def lamToPythonDef (n : Name) (e : Expr) : MetaM PyVal := do
+def exprLamToPythonDef (n : Name) (e : Expr) : MetaM PyVal := do
   if not e.isLambda then
     let body ← exprToPython e
     return s!"def {n.getString!}():\n\treturn {body}"
   else
     Meta.lambdaTelescope e
-      (fun args body => do
+      fun args body => do
         let args ← args.mapM exprToPython
         let args := joinSep args.toList ", "
         let body ← exprToPython body
-        return s!"def {n.getString!}({args}):\n\treturn {body}")
+        return s!"def {n.getString!}({args}):\n\treturn {body}"
 
 #print DefinitionVal
 
-def defToPython (n : Name) : MetaM PyVal := do
+def exprDefToPython (n : Name) : MetaM PyVal := do
   let info ← getConstInfo n
   match info with
   | .defnInfo info =>
-    lamToPythonDef n info.value
+    exprLamToPythonDef n info.value
   | _ =>
     logError m!"{n} is not a definition"
     failure
@@ -301,10 +301,10 @@ def z := 4
 #check List.cons
 
 #eval do
-  defToPython ``test_1
+  exprDefToPython ``test_1
 
 #eval do
-  defToPython ``test_2
+  exprDefToPython ``test_2
 
 #eval do
   let i ← getConstInfo ``countImplicits
@@ -326,16 +326,54 @@ inductive Kont where
 | ret : Kont
 | effect : Kont
 
+#check Expr.app1?
+
+partial def exprListToPythonArgs (e : Expr) : MetaM (List PyVal) := do
+  let (hd, args) := e.getAppFnArgs
+  if hd = ``List.nil then return []
+  if hd = ``List.cons then
+    let arg₁ := args[1]!
+    let arg₂ := args[2]!
+    return (← exprToPython arg₁) :: (← exprListToPythonArgs arg₂)
+  logError m!"Cannot handle argument list {e}"
+  failure
+
+def opArgToPython (e : Expr) : MetaM PyVal := do
+  let ty ← Meta.inferType e
+  if h : ty.isForall then
+    -- A little tedium to get the index
+    let .some tyIndex := (ty.forallDomain h).app1? ``Fin
+      | logError m!"Expected {ty} to be of the form `Fin n → α`"
+        failure
+    let isZero ← Meta.isDefEq tyIndex (.const ``Nat.zero [])
+    if isZero then
+      return ""
+    else
+      let .some (_, e) := e.app2? ``listToVec
+       | logError s!"Expected {e} to be `listToVec [a, b, c]`"
+         failure
+      let args ← exprListToPythonArgs e
+      return joinSep args ", "
+  else
+    logError m!"Expected {e} to be of type `Fin n → α`"
+    failure
+
+#eval do
+  let t ← `(iNil)
+  let e ← Elab.Term.elabTerm t none
+  let ty ← Meta.inferType e
+  logInfo m!"ty = {ty}"
+  logInfo s!"arg: {← opArgToPython e}"
+
 abbrev PyEnv := Expr → String
 
-def runWithCont (k : Kont) (e : Expr) : MetaM PyVal := do
+def runWithCont (k : Kont) (v : PyVal) : MetaM PyVal := do
   match k with
   | .assign x =>
     let x ← exprToPython x
-    let v ← exprToPython e
     return s!"{x} = {v}"
-  | .ret => return s!"return {← exprToPython e}"
-  | .effect => return ← exprToPython e
+  | .ret => return s!"return {v}"
+  | .effect => return v
 
 partial def freeMToPython (k : Kont) (env : PyEnv) (e : Expr) : MetaM PyVal := do
   let ty ← Meta.inferType e
@@ -347,28 +385,31 @@ partial def freeMToPython (k : Kont) (env : PyEnv) (e : Expr) : MetaM PyVal := d
     let eArgs := e.getAppArgs
     if (e.app4? ``fPure).isSome
     then
-      runWithCont k eArgs[4]!
-    else if e.getAppFn.constName! == ``fBind
+      logInfo m!"pure {eArgs[3]!}"
+      let v ← exprToPython (eArgs[3]!)
+      runWithCont k v
+    else if e.getAppFn.constName! = ``fBind
     then
       let x := eArgs[4]!
       let f := eArgs[5]!
       assert! f.isLambda
       Meta.lambdaTelescope f
         (fun vars body => do
+          logInfo m!"lam {vars}"
           let v := vars[0]!
           let xPy ← freeMToPython (.assign v) env x
           let bPy ← freeMToPython k env body
           return s!"{xPy}\n{bPy}")
-    else if e.getAppFn.constName! == ``fOp
+    else if e.getAppFn.constName! = ``fOp
     then
+      logInfo m!"op {eArgs[2]!}"
       let opStr := env eArgs[2]!
-      let args ← (eArgs.drop 3).mapM exprToPython
-      let args := joinSep args.toList ", "
-      return s!"{opStr}({args})"
+      let args ← opArgToPython (eArgs[3]!)
+      let v := s!"{opStr}({args})"
+      runWithCont k v
     else
       logError m!"Unexpected term: {e.getAppFn}"
       failure
-
 
 def toPython (e : Expr) : PyVal := ""
 
@@ -390,10 +431,16 @@ abbrev RWSig : Signature Commands where
   | .read => Nat
   | .write => Unit
 
+
 --- whyyyy
 def read : FreeM RWSig Nat := FreeM.fOp Commands.read (fun i => ⟦⟧ i)
 
 def write : Nat → FreeM RWSig Unit := fun n => FreeM.fOp Commands.write ⟦n⟧
+
+
+def test₀ : FreeM RWSig Nat := do
+  return 32
+
 
 def test := do
   let x ← pure 4
@@ -440,5 +487,16 @@ def envOps (e : Expr) :=
   Lean.logInfo m!"{e}"
   logInfo m!"{← freeMToPython .ret envOps e}"
 
+#eval do
+  let i ← Lean.getConstInfo ``test₀
+  let e := i.value!
+  Lean.logInfo m!"{e}"
+  let e ← Lean.Meta.whnf e
+  let e ← Lean.instantiateMVars e
+  Lean.logInfo m!"{e}"
+  logInfo m!"{← freeMToPython .ret envOps e}"
+
+#eval do
+  logInfo m!"{← defToPython ``test}"
 
 end Test
